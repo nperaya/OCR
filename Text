@@ -1,0 +1,138 @@
+import easyocr
+import cv2
+import numpy as np
+import re
+import os
+import matplotlib.pyplot as plt
+
+# === CONFIG ===
+image_path = r"C:\Users\PC\Desktop\trainee\pic\pic2.jpg"
+output_txt_path = r"C:\Users\PC\Desktop\trainee\output.txt"
+
+# === โหลดภาพ ===
+image = cv2.imread(image_path)
+
+# === Grayscale และเพิ่ม Contrast ===
+gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+equalized = cv2.equalizeHist(gray)
+enhanced = cv2.convertScaleAbs(equalized, alpha=1.5, beta=0)
+
+# ใช้ Adaptive Thresholding
+adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY, 35, 37)
+
+# === แปลง adaptive_thresh เป็น BGR สำหรับ EasyOCR ===
+adaptive_bgr = cv2.cvtColor(adaptive_thresh, cv2.COLOR_GRAY2BGR)
+
+# === OCR ด้วย EasyOCR บน adaptive_thresh ===
+reader = easyocr.Reader(['en'])
+results = reader.readtext(
+    adaptive_bgr,
+    detail=1,
+    paragraph=False,
+    text_threshold=0.5,
+    low_text=0.3,
+    link_threshold=0.5
+)
+
+# === แสดงภาพหลังการกรอง ===
+# วาดกรอบข้อความจาก OCR
+for result in results:
+    text = result[1]
+    box = result[0]
+    # วาดกรอบสี่เหลี่ยมที่ OCR ตรวจจับ
+    cv2.polylines(image, [np.int32(box)], isClosed=True, color=(0, 255, 0), thickness=2)
+    # วางข้อความบนภาพ
+    cv2.putText(image, text, (int(box[0][0]), int(box[0][1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+
+# === แสดงผลภาพทั้งหมด ===
+plt.figure(figsize=(12, 12))
+
+# แสดงภาพต้นฉบับ
+plt.subplot(1, 2, 1)
+plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+plt.title('Image after EasyOCR')
+plt.axis('off')
+
+# แสดงภาพหลังการกรอง Adaptive Thresholding
+plt.subplot(1, 2, 2)
+plt.imshow(adaptive_thresh, cmap='gray')
+plt.title('Image after Adaptive Thresholding')
+plt.axis('off')
+
+plt.show()
+
+# === ฟังก์ชัน Clean Text ===
+def clean_text(text):
+    text = text.upper()
+    text = text.replace('|', '1')
+    text = text.replace('||', '11')
+    text = text.replace('Ob', '06').replace('0b', '06').replace('OB', '06').replace('0B', '06')
+    text = text.replace('O|', '01').replace('OE', '01').replace('0L', '01')
+    text = text.replace('O ', '0').replace('O', '0')
+    text = text.replace('Oq', '09').replace('OQ', '09').replace('0q', '09').replace('0Q', '09')
+    text = text.replace('TRAI', 'TRAY').replace('TRAIY', 'TRAY').replace('TRQY', 'TRAY')
+    return text.strip()
+
+# === เรียงจากบนลงล่าง ===
+results_sorted = sorted(results, key=lambda r: min(pt[1] for pt in r[0]))
+
+# === สร้างผลลัพธ์ ===
+pattern = r'LINE\s+\d+\s+STACK\s+\d+\s+TRAY\s+\d+'
+cleaned_lines = []
+
+cleaned_texts = [clean_text(text) for (_, text, _) in results_sorted]
+
+i = 0
+used_indices = set()
+while i < len(cleaned_texts) - 2:
+    line1 = cleaned_texts[i].strip()
+    line2 = cleaned_texts[i+1].strip()
+    line3 = cleaned_texts[i+2].strip()
+    
+    # Case 1: แบบปกติ
+    combined = f"{line2} {line1} {line3}".strip()
+    match = re.search(pattern, combined)
+    if match:
+        numbers = match.group()
+        # ตรวจสอบความยาวของเลขในบรรทัดแรก
+        if len(numbers.replace("LINE", "").replace("STACK", "").replace("TRAY", "").replace(" ", "")) != 6:
+            numbers += ' **Error!!!'  # เพิ่ม !!! หากเลขไม่ครบ 6 หลัก
+        cleaned_lines.append(numbers)
+        used_indices.update([i, i+1, i+2])
+        i += 3
+        continue
+
+    # Case 2: TRAY อยู่บรรทัดเดียว แล้วเลข tray อยู่ถัดไป
+    if line1.startswith("TRAY") and re.match(r'^LINE[:\s]\s*\d+\s+STACK\s+\d+$', line2, re.IGNORECASE) and line3.isdigit():
+        # Clean LINE: -> LINE
+        line2_fixed = line2.replace(":", "")
+        combined2 = f"{line2_fixed} TRAY {line3}"
+        match2 = re.search(pattern, combined2)
+        if match2:
+            numbers = match2.group()
+            if len(numbers.replace("LINE", "").replace("STACK", "").replace("TRAY", "").replace(" ", "")) != 6:
+                numbers += '**eror!!'  # เพิ่ม !!! หากเลขไม่ครบ 6 หลัก
+            cleaned_lines.append(numbers)
+            used_indices.update([i, i+1, i+2])
+            i += 3
+            continue
+
+    i += 1
+
+# === เพิ่มข้อความที่ไม่ถูกใช้ ===
+for j in range(len(cleaned_texts)):
+    if j not in used_indices:
+        cleaned_lines.append(cleaned_texts[j])
+
+# === บันทึกผลลัพธ์ ===
+full_text_crlf = '\r\n'.join(cleaned_lines)
+with open(output_txt_path, 'w', encoding='utf-8', newline='\r\n') as f:
+    f.write(full_text_crlf)
+
+print("✅ save text at:", output_txt_path)
+print("📋 text:\n")
+print(full_text_crlf)
+
+#กรองภาพให้ดีกว่านี้ เพราะอ่านติด data matrix เป็นตัวเลข ค่าโอเคเเล้วเเต่ไปเพิ่มเงื่อนไขสำหรับกรอง data matrix โดยเฉพาะ
+#ผลลัพธ์ที่ได้เอาเเค่ตัวเลข
